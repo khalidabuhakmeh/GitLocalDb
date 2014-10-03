@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
@@ -33,8 +34,8 @@ namespace BranchDatabases
             public GitLocalDb(string prefix, string outputPath = null, bool forceNew = false)
             {
                 _forceNew = forceNew;
-                BranchName = new Repository(Directory.GetCurrentDirectory()).CurrentBranch.Name;
-                DatabaseName = string.Format("{0}_{1}", prefix, BranchName);
+                BranchName = GetBranchName();
+                DatabaseName = string.Join("_", prefix, BranchName);
                 OutputFolder = Path.Combine(string.IsNullOrEmpty(outputPath)
                     ? Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)
                     : outputPath, DatabaseDirectory);
@@ -121,6 +122,29 @@ namespace BranchDatabases
                     if (File.Exists(DatabaseMdfPath)) File.Delete(DatabaseMdfPath);
                     if (File.Exists(DatabaseLogPath)) File.Delete(DatabaseLogPath);
                 }
+            }
+
+            protected string GetBranchName()
+            {
+                // Start the child process.
+                var p = new Process
+                {
+                    StartInfo =
+                    {
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        FileName = "git",
+                        Arguments = "rev-parse --abbrev-ref HEAD",
+                    }
+                };
+                p.Start();
+                var output = p.StandardOutput.ReadToEnd();
+
+                if (output.Contains("fatal"))
+                    throw new Exception("you are not executing in a git directory");
+
+                p.WaitForExit();
+                return output.Trim();
             }
         }
     }
