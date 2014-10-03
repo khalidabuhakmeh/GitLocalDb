@@ -18,6 +18,9 @@ namespace BranchDatabases
     {
         public class GitLocalDb
         {
+            private const string ExistsSql = "select 1 from sys.databases where name = '{0}'";
+            private const string MasterConnectionString = @"Data Source=(LocalDB)\v11.0;Initial Catalog=master;Integrated Security=True";
+            private readonly bool _forceNew;
             public static string DatabaseDirectory = "Data";
 
             public string ConnectionStringName { get; private set; }
@@ -27,11 +30,15 @@ namespace BranchDatabases
             public string DatabaseLogPath { get; private set; }
             public string BranchName { get; private set; }
 
-            public GitLocalDb(string prefix)
+            public GitLocalDb(string prefix, string outputPath = null, bool forceNew = false)
             {
+                _forceNew = forceNew;
                 BranchName = new Repository(Directory.GetCurrentDirectory()).CurrentBranch.Name;
-                DatabaseName =  string.Format("{0}_{1}", prefix, BranchName);
-                CreateDatabase();
+                DatabaseName = string.Format("{0}_{1}", prefix, BranchName);
+                OutputFolder = Path.Combine(string.IsNullOrEmpty(outputPath)
+                    ? Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)
+                    : outputPath, DatabaseDirectory);
+                Initialize();
             }
 
             public IDbConnection OpenConnection()
@@ -39,9 +46,17 @@ namespace BranchDatabases
                 return new SqlConnection(ConnectionStringName);
             }
 
-            private void CreateDatabase()
+            public void Destroy()
             {
-                OutputFolder = Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), DatabaseDirectory);
+                using (var connection = new SqlConnection(MasterConnectionString))
+                {
+                    connection.Open();
+                    DetachDatabase(connection);
+                }
+            }
+
+            protected void Initialize()
+            {
                 var mdfFilename = string.Format("{0}.mdf", DatabaseName);
                 DatabaseMdfPath = Path.Combine(OutputFolder, mdfFilename);
                 DatabaseLogPath = Path.Combine(OutputFolder, String.Format("{0}_log.ldf", DatabaseName));
@@ -53,32 +68,52 @@ namespace BranchDatabases
                 }
 
                 // If the database does not already exist, create it.
-                var connectionString = String.Format(@"Data Source=(LocalDB)\v11.0;Initial Catalog=master;Integrated Security=True");
-                using (var connection = new SqlConnection(connectionString))
+                using (var connection = new SqlConnection(MasterConnectionString))
                 {
                     connection.Open();
-                    var cmd = connection.CreateCommand();
-                    DetachDatabase();
-                    cmd.CommandText = String.Format("CREATE DATABASE {0} ON (NAME = N'{0}', FILENAME = '{1}')", DatabaseName, DatabaseMdfPath);
-                    cmd.ExecuteNonQuery();
-                }
 
+                    if (_forceNew || !DatabaseExists(connection))
+                    {
+                        CreateNewDatabase(connection);
+                    }
+                    else
+                    {
+                        ConnectionStringName = string.Format(@"Data Source=(LocalDB)\v11.0;Initial Catalog={0};Integrated Security=True;", DatabaseName);
+                    }
+                }
+            }
+
+            protected void CreateNewDatabase(SqlConnection connection)
+            {
+                var cmd = connection.CreateCommand();
+                Destroy();
+                var sql = string.Format(@"if not exists(select * from sys.databases where name = '{0}') CREATE DATABASE {0} ON (NAME = N'{0}', FILENAME = '{1}')", DatabaseName, DatabaseMdfPath);
+
+                cmd.CommandText = sql;
+                cmd.ExecuteNonQuery();
                 // Open newly created, or old database.
                 ConnectionStringName = String.Format(@"Data Source=(LocalDB)\v11.0;AttachDBFileName={1};Initial Catalog={0};Integrated Security=True;", DatabaseName, DatabaseMdfPath);
             }
 
-            void DetachDatabase()
+            protected bool DatabaseExists(SqlConnection connection)
+            {
+                using (var command = connection.CreateCommand())
+                {
+                    command.CommandText = string.Format(ExistsSql, DatabaseName);
+                    using (var reader = command.ExecuteReader())
+                    {
+                        return reader.HasRows;
+                    }
+                }
+            }
+
+            protected void DetachDatabase(SqlConnection connection)
             {
                 try
                 {
-                    var connectionString = String.Format(@"Data Source=(LocalDB)\v11.0;Initial Catalog=master;Integrated Security=True");
-                    using (var connection = new SqlConnection(connectionString))
-                    {
-                        connection.Open();
-                        var cmd = connection.CreateCommand();
-                        cmd.CommandText = string.Format("ALTER DATABASE {0} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; exec sp_detach_db '{0}'", DatabaseName);
-                        cmd.ExecuteNonQuery();
-                    }
+                    var cmd = connection.CreateCommand();
+                    cmd.CommandText = string.Format("ALTER DATABASE {0} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; exec sp_detach_db '{0}'", DatabaseName);
+                    cmd.ExecuteNonQuery();
                 }
                 catch { }
                 finally
